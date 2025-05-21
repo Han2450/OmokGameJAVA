@@ -1,14 +1,19 @@
 import javafx.application.Application;
+import javafx.application.Platform;
 import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
+import javafx.scene.control.*;
+import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseEvent;
+import javafx.scene.layout.HBox;
 import javafx.scene.layout.Pane;
 import javafx.scene.paint.Color;
 import javafx.stage.Stage;
-import javafx.scene.control.Alert;
-import javafx.scene.control.Alert.AlertType;
-import javafx.scene.control.Button;
+
+import java.io.*;
+import java.net.*;
+import java.util.Optional;
 
 public class OmokGame extends Application {
 
@@ -19,47 +24,82 @@ public class OmokGame extends Application {
     public boolean isGameOver = false;
     public boolean samsam = false;
     private boolean useGeneralDol = false;
-    private boolean useNormalDol = false;
     private boolean useAttackDol = false;
     private Button generalDolButton;
-    private Button normalDolButton;
     private Button attackDolButton;
     private static final int BOARD_SIZE = (SIZE - 1) * CELL_SIZE;
     private static final int PADDING = 20;
     private static final int CANVAS_WIDTH = BOARD_SIZE + PADDING * 2;
     private static final int CANVAS_HEIGHT = BOARD_SIZE + PADDING * 2;
 
+    private Socket socket;
+    private BufferedReader in;
+    private PrintWriter out;
+    private String nickname = "Guest";
+    private TextArea chatArea;
+    private TextField inputField;
+
     @Override
     public void start(Stage primaryStage) {
+        TextInputDialog dialog = new TextInputDialog("Player");
+        dialog.setTitle("닉네임 입력");
+        dialog.setHeaderText(null);
+        dialog.setContentText("닉네임을 입력하세요:");
+        Optional<String> result = dialog.showAndWait();
+        result.ifPresent(name -> nickname = name.trim().isEmpty() ? "Guest" : name);
+
+        setupNetwork();
+
         Canvas canvas = new Canvas(CANVAS_WIDTH, CANVAS_HEIGHT);
         GraphicsContext gc = canvas.getGraphicsContext2D();
-
         drawBoard(gc);
 
         generalDolButton = new Button("장군돌 두기");
         attackDolButton = new Button("공격돌 두기");
 
-        generalDolButton.setLayoutX(600);
+        generalDolButton.setLayoutX(5);
         generalDolButton.setLayoutY(20);
-        attackDolButton.setLayoutX(800);
+        generalDolButton.setPrefWidth(120);
+        generalDolButton.setPrefHeight(30);
+
+        attackDolButton.setLayoutX(140);
         attackDolButton.setLayoutY(20);
+        attackDolButton.setPrefWidth(120);
+        attackDolButton.setPrefHeight(30);
 
-        generalDolButton.setOnAction(e -> {
-            useGeneralDol = true;
-            useAttackDol = false;
+
+        chatArea = new TextArea();
+        chatArea.setEditable(false);
+        chatArea.setWrapText(true);
+        chatArea.setPrefHeight(100);
+        chatArea.setPrefWidth(260);
+        chatArea.setLayoutX(5);
+        chatArea.setLayoutY(80);
+
+        inputField = new TextField();
+        inputField.setPromptText("채팅 입력...");
+        inputField.setPrefWidth(260);
+        inputField.setLayoutX(5);
+        inputField.setLayoutY(160);
+        inputField.setOnKeyPressed(e -> {
+            if (e.getCode() == KeyCode.ENTER) {
+                String msg = inputField.getText();
+                if (!msg.trim().isEmpty()) {
+                    out.println("MSG|" + nickname + "|" + msg);
+                    inputField.clear();
+                }
+            }
         });
-        
-        attackDolButton.setOnAction(e -> {
-            useGeneralDol = false;
-            useAttackDol = true;
-        });
 
-        Pane root = new Pane(canvas, generalDolButton, attackDolButton);
+        Pane rightPanel = new Pane();
+        rightPanel.setPrefSize(300, CANVAS_HEIGHT);
+        rightPanel.getChildren().addAll(generalDolButton, attackDolButton, chatArea, inputField);
 
-        Scene scene = new Scene(root);
-        primaryStage.setWidth(1000);
-        primaryStage.setHeight(605);
-        primaryStage.setTitle("오목 게임");
+        HBox root = new HBox(20);
+        root.getChildren().addAll(canvas, rightPanel);
+
+        Scene scene = new Scene(root, CANVAS_WIDTH + 300, CANVAS_HEIGHT);
+        primaryStage.setTitle("오목 게임 - " + nickname);
         primaryStage.setScene(scene);
         primaryStage.show();
 
@@ -79,10 +119,10 @@ public class OmokGame extends Application {
                         Dol temp;
                         if (useGeneralDol) {
                             temp = new GeneralDol(col, row);
-                            useGeneralDol = false; // 한 번 사용 후 해제
+                            useGeneralDol = false;
                         } else if (useAttackDol) {
                             temp = new AttackDol(col, row);
-                            useAttackDol = false; // 한 번 사용 후 해제
+                            useAttackDol = false;
                         } else {
                             temp = new BlackDol(col, row);
                         }
@@ -91,7 +131,7 @@ public class OmokGame extends Application {
                         Rule rule = new Rule(board, SIZE, this);
                         if (rule.SamSam(row, col)) {
                             board[row][col] = null;
-                            Alert alert = new Alert(AlertType.WARNING);
+                            Alert alert = new Alert(Alert.AlertType.WARNING);
                             alert.setTitle("금수");
                             alert.setHeaderText(null);
                             alert.setContentText("쌍삼 금수입니다. 다른 자리에 놓아주세요.");
@@ -108,7 +148,7 @@ public class OmokGame extends Application {
                     WinChecker checker = new WinChecker(board, SIZE, this);
                     if (checker.checkWin(row, col)) {
                         isGameOver = true;
-                        Alert alert = new Alert(AlertType.INFORMATION);
+                        Alert alert = new Alert(Alert.AlertType.INFORMATION);
                         alert.setTitle("게임 종료");
                         alert.setHeaderText(null);
                         alert.setContentText((!blackTurn ? "흑돌" : "백돌") + " 승리!");
@@ -119,6 +159,8 @@ public class OmokGame extends Application {
                 }
             }
         });
+
+        new Thread(this::receiveLoop).start();
     }
 
     private void drawBoard(GraphicsContext gc) {
@@ -160,6 +202,33 @@ public class OmokGame extends Application {
         blackTurn = true;
         isGameOver = false;
         drawBoard(gc);
+    }
+
+    private void setupNetwork() {
+        try {
+            socket = new Socket("127.0.0.1", 9999);
+            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            out = new PrintWriter(socket.getOutputStream(), true);
+            out.println("HELLO|" + nickname);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void receiveLoop() {
+        String msg;
+        try {
+            while ((msg = in.readLine()) != null) {
+                if (msg.startsWith("MSG|")) {
+                    String[] parts = msg.split("\\|", 3);
+                    String sender = parts[1];
+                    String content = parts[2];
+                    Platform.runLater(() -> chatArea.appendText(sender + ": " + content + "\n"));
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     public static void main(String[] args) {
